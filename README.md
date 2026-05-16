@@ -1,61 +1,44 @@
-# Stock Investment Quiz App v2
+# Stock Quiz App# Stock Quiz App（財務分析・ファンダメンタルズ・チャート分析）を学習できる
+**Streamlit製クイズアプリ**です。
 
-チャート分析とファンダメンタルズを組み合わせて、株式投資の判断力を鍛える Streamlit アプリです。
+---
 
-## v2で追加した8つの改善
+## ✅ アプリの特徴
 
-1. 難易度分類を追加
-2. 問題をランダム出題に対応
-3. 正答率・履歴を `results.csv` に保存
-4. 出来高付きチャートに変更
-5. 問題数を24問に拡張
-6. UIを1問ずつ表示する形式に変更
-7. Streamlit Community Cloud でデプロイしやすい構成に整理
-8. `pytest` 用のテストコードを追加
+### 1. 出題ロジック（重複なし）
+- 出題はキュー方式
+- 全問題を出し切るまで重複なし
+- フィルタ変更時は自動リセット
 
-## ファイル構成
+---
 
-```text
-stock_quiz_app/
-├─ app.py
-├─ questions.json
-├─ requirements.txt
-├─ README.md
-├─ .gitignore
-├─ .streamlit/
-│  └─ config.toml
-├─ assets/
-│  ├─ double_bottom_question.png
-│  ├─ double_bottom_answer.png
-│  ├─ breakout_question.png
-│  ├─ breakout_answer.png
-│  ├─ downtrend_question.png
-│  └─ downtrend_answer.png
-├─ scripts/
-│  └─ generate_charts.py
-└─ tests/
-   └─ test_questions.py
-```
+### 2. 選択肢の安定表示（重要）
+- 選択肢は問題ごとに **1回だけシャッフル**
+- セッションで保持 → 再描画でも順番が変わらない
+- → 「クリックしたのに別回答になる」バグを完全排除
 
-## セットアップ
+---
 
-```powershell
-python -m venv .venv
-.venv\Scriptsctivate
-pip install -r requirements.txt
-streamlit run app.py
-```
+### 3. 自動進行（高テンポUX）
+- 回答後、自動で次の問題へ遷移
+- 正解/不正解で表示時間を制御
 
-## テスト実行
+---
 
-```powershell
-pytest
-```
+### 4. チャート問題対応
+- 価格データ + 出来高
+- 抵抗線・支持線の表示
 
-## デプロイ
+---
 
-Streamlit Community Cloud にデプロイする場合は、GitHubにこのリポジトリをPushし、メインファイルとして `app.py` を指定します。
+### 5. 安定した状態管理
+- `st.session_state` で一元管理
+- UIとロジックを分離
+- インデント崩壊を防ぐ構造
 
-## 注意事項
+---
 
-このアプリは投資学習を目的としたものです。特定銘柄の売買を推奨するものではありません。
+## 🗂️ ディレクトリ構成
+
+
+
