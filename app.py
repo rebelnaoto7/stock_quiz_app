@@ -1,293 +1,316 @@
-import csv
 import json
 import random
-from datetime import datetime
+import time
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
-
-APP_TITLE = "株式投資クイズアプリ"
-QUESTIONS_PATH = Path("questions.json")
-RESULTS_PATH = Path("results.csv")
-
-st.set_page_config(page_title=APP_TITLE, page_icon="📈", layout="wide")
-
-st.markdown("""
-<style>
-html, body, [class*="css"] { font-family: "Meiryo UI", "Meiryo", sans-serif; }
-.stApp { color: #f9fafb; }
-.block-container { max-width: 1080px; padding-top: 2rem; }
-.main-title { font-size: 34px; font-weight: 900; color: #f9fafb; margin-bottom: 6px; }
-.sub-title { font-size: 17px; color: #d1d5db; margin-bottom: 20px; }
-.meta-badge { display: inline-block; background-color: #1d4ed8; color: #ffffff; padding: 5px 12px; border-radius: 999px; font-size: 13px; font-weight: 800; margin-right: 8px; margin-bottom: 8px; }
-.difficulty-badge { display: inline-block; background-color: #7c3aed; color: #ffffff; padding: 5px 12px; border-radius: 999px; font-size: 13px; font-weight: 800; margin-right: 8px; margin-bottom: 8px; }
-.question-title { font-size: 25px; font-weight: 900; color: #ffffff; margin: 8px 0 14px 0; }
-p, label, span, div { color: #f3f4f6; }
-.stRadio label { color: #f3f4f6 !important; }
-.result-card { padding: 16px; border-radius: 12px; margin: 14px 0 12px 0; line-height: 1.7; font-size: 16px; }
-.result-correct { background-color: #064e3b; border-left: 6px solid #22c55e; }
-.result-wrong { background-color: #4c1d1d; border-left: 6px solid #ef4444; }
-.result-status { font-size: 18px; font-weight: 900; margin-bottom: 6px; }
-.user-answer { color: #fde68a; font-weight: 900; }
-.correct-answer { color: #bbf7d0; font-weight: 900; }
-.explanation-card { background-color: #0f172a; color: #f9fafb; padding: 18px; border-radius: 14px; border: 1px solid #334155; border-left: 6px solid #60a5fa; margin: 14px 0 28px 0; line-height: 1.8; }
-.explanation-title { font-size: 18px; font-weight: 900; color: #bfdbfe; margin-bottom: 10px; }
-.explanation-section { background-color: #111827; padding: 12px 14px; border-radius: 10px; margin-top: 10px; }
-.explanation-label { color: #93c5fd; font-weight: 900; margin-right: 6px; }
-.explanation-point { color: #fde68a; font-weight: 900; }
-.warning-box { background-color: #1f2937; color: #f9fafb; padding: 16px; border-radius: 12px; border-left: 5px solid #f97316; margin-top: 24px; line-height: 1.7; }
-[data-testid="stImageCaption"] { color: #d1d5db; font-size: 14px; }
-</style>
-""", unsafe_allow_html=True)
+import matplotlib
+import matplotlib.pyplot as plt
 
 
-def load_questions(path: Path = QUESTIONS_PATH) -> list[dict]:
-    if not path.exists():
-        st.error(f"{path} が見つかりません。")
+# =========================================================
+# Config（必要ならここだけ触る）
+# =========================================================
+APP_VERSION = "2026-05-16_app_unbreakable_v1"
+AUTO_ADVANCE = True
+SLEEP_SEC_CORRECT = 0.8
+SLEEP_SEC_WRONG = 1.6
+
+# フォント（Windows想定）
+matplotlib.rcParams["font.family"] = ["Meiryo UI", "Meiryo", "MS Gothic", "Yu Gothic", "sans-serif"]
+matplotlib.rcParams["axes.unicode_minus"] = False
+
+
+# =========================================================
+# Utils
+# =========================================================
+def rerun():
+    """Streamlit version差異吸収"""
+    try:
+        st.rerun()
+    except Exception:
+        st.experimental_rerun()
+
+
+def load_questions(path: str = "questions.json") -> list[dict]:
+    p = Path(path)
+    if not p.exists():
+        st.error("questions.json が見つかりません。app.py と同じフォルダに置いてください。")
         st.stop()
-    with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        st.error(f"questions.json が壊れています: {e}")
+        st.stop()
+
+    if not isinstance(data, list):
+        st.error("questions.json は配列(list)である必要があります。")
+        st.stop()
+
+    required = {"id", "category", "difficulty", "question", "options", "answer"}
+    ids = set()
+
+    for i, q in enumerate(data):
+        if not isinstance(q, dict):
+            st.error(f"{i}番目の要素が dict ではありません。")
+            st.stop()
+
+        missing = required - set(q.keys())
+        if missing:
+            st.error(f"id={q.get('id')} の問題に必須キーが不足: {sorted(list(missing))}")
+            st.stop()
+
+        if q["id"] in ids:
+            st.error(f"id が重複しています: {q['id']}")
+            st.stop()
+        ids.add(q["id"])
+
+        if not isinstance(q["options"], list) or len(q["options"]) < 2:
+            st.error(f"id={q['id']} の options は2つ以上の配列にしてください。")
+            st.stop()
+
+        if q["answer"] not in q["options"]:
+            st.error(f"id={q['id']} の answer が options に含まれていません。")
+            st.stop()
+
+        # チャート分析は chart_data 必須（「チャートがない」事故を防ぐ）
+        if q.get("category") == "チャート分析" and "chart_data" not in q:
+            st.error(f"id={q['id']} はチャート分析ですが chart_data がありません。")
+            st.stop()
+
+    return data
 
 
-def initialize_state():
+def filter_questions(qs: list[dict], cat: str, diff: str) -> list[dict]:
+    result = qs
+    if cat != "すべて":
+        result = [q for q in result if q.get("category") == cat]
+    if diff != "すべて":
+        result = [q for q in result if q.get("difficulty") == diff]
+    # チャート分析は chart_data 無しなら除外（念のため）
+    result = [q for q in result if q.get("category") != "チャート分析" or "chart_data" in q]
+    return result
+
+
+def render_chart(chart_data: dict):
+    prices = chart_data.get("prices", [])
+    volumes = chart_data.get("volumes", [])
+    hints = chart_data.get("hints", {})  # {"resistance":..., "support":...}
+
+    if not prices:
+        st.warning("chart_data はありますが prices が空です。")
+        return
+
+    x = list(range(len(prices)))
+    fig, ax1 = plt.subplots(figsize=(9, 4))
+
+    ax1.plot(x, prices, linewidth=2, label="株価")
+    ax1.grid(True, alpha=0.3)
+    ax1.set_title("株価チャート")
+    ax1.set_ylabel("株価")
+
+    if isinstance(hints, dict):
+        if "resistance" in hints:
+            ax1.axhline(hints["resistance"], color="red", linestyle="--", alpha=0.7,
+                        label=f"抵抗線 {hints['resistance']}")
+        if "support" in hints:
+            ax1.axhline(hints["support"], color="green", linestyle="--", alpha=0.7,
+                        label=f"支持線 {hints['support']}")
+
+    if volumes:
+        ax2 = ax1.twinx()
+        ax2.bar(x, volumes, alpha=0.25, label="出来高")
+        ax2.set_ylabel("出来高")
+
+    ax1.legend(loc="upper left")
+    st.pyplot(fig, clear_figure=True)
+
+
+# =========================================================
+# Session State (一元管理)
+# =========================================================
+def ss_init():
     defaults = {
-        "quiz_started": False,
-        "quiz_finished": False,
-        "quiz_questions": [],
-        "current_index": 0,
-        "answers": {},
-        "submitted_current": False,
-        "last_saved": False,
+        "current_q": None,
+        "answered": False,
+        "score": {"correct": 0, "total": 0},
+        "render_id": 0,
+
+        # 出題キュー
+        "queue_ids": [],
+        "filter_key": "",
+
+        # 選択肢固定（ここが「回答が動く」バグの解決点）
+        "fixed_options": [],        # 現在問題の表示順
+        "fixed_qid": None,          # fixed_options が紐づく問題id
     }
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
 
-def filter_questions(questions, categories, difficulties):
-    return [
-        q for q in questions
-        if q.get("category") in categories and q.get("difficulty") in difficulties
-    ]
+def make_filter_key(cat: str, diff: str, n: int) -> str:
+    return f"{cat}__{diff}__{n}"
 
 
-def start_quiz(selected_questions):
-    st.session_state.quiz_questions = selected_questions
-    st.session_state.current_index = 0
-    st.session_state.answers = {}
-    st.session_state.quiz_started = True
-    st.session_state.quiz_finished = False
-    st.session_state.submitted_current = False
-    st.session_state.last_saved = False
+def rebuild_queue(filtered_list: list[dict]):
+    ids = [q["id"] for q in filtered_list]
+    random.shuffle(ids)
+    st.session_state.queue_ids = ids
 
 
-def calculate_results(quiz_questions, answers):
-    total = len(quiz_questions)
-    correct = 0
-    by_category = {}
-    by_difficulty = {}
-    for q in quiz_questions:
-        qid = str(q["id"])
-        is_correct = answers.get(qid) == q["answer"]
-        if is_correct:
-            correct += 1
-        category = q.get("category", "未分類")
-        difficulty = q.get("difficulty", "未設定")
-        by_category.setdefault(category, {"correct": 0, "total": 0})
-        by_difficulty.setdefault(difficulty, {"correct": 0, "total": 0})
-        by_category[category]["total"] += 1
-        by_difficulty[difficulty]["total"] += 1
-        if is_correct:
-            by_category[category]["correct"] += 1
-            by_difficulty[difficulty]["correct"] += 1
-    accuracy = correct / total if total else 0
-    return correct, total, accuracy, by_category, by_difficulty
+def set_current_question(q: dict):
+    st.session_state.current_q = q
+    st.session_state.answered = False
+    st.session_state.render_id += 1
+
+    # ✅ 選択肢は「このタイミングで1回だけ」シャッフルして固定
+    opts = list(q["options"])
+    random.shuffle(opts)
+    st.session_state.fixed_options = opts
+    st.session_state.fixed_qid = q["id"]
 
 
-def save_history(correct, total, accuracy, by_category, by_difficulty):
-    RESULTS_PATH.parent.mkdir(exist_ok=True)
-    file_exists = RESULTS_PATH.exists()
-    row = {
-        "datetime": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "score": correct,
-        "total": total,
-        "accuracy": round(accuracy, 4),
-        "category_scores": json.dumps(by_category, ensure_ascii=False),
-        "difficulty_scores": json.dumps(by_difficulty, ensure_ascii=False),
-    }
-    with RESULTS_PATH.open("a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=row.keys())
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row)
+def pick_next_question(filtered_list: list[dict], cat: str, diff: str):
+    if not filtered_list:
+        st.session_state.current_q = None
+        return
+
+    fk = make_filter_key(cat, diff, len(filtered_list))
+    if st.session_state.filter_key != fk:
+        st.session_state.filter_key = fk
+        rebuild_queue(filtered_list)
+
+    if not st.session_state.queue_ids:
+        rebuild_queue(filtered_list)
+
+    next_id = st.session_state.queue_ids.pop(0)
+    q = next(q for q in filtered_list if q["id"] == next_id)
+    set_current_question(q)
 
 
-def show_question(q):
-    st.progress((st.session_state.current_index + 1) / len(st.session_state.quiz_questions))
-    st.write(f"進捗：{st.session_state.current_index + 1} / {len(st.session_state.quiz_questions)} 問")
-    st.markdown(f'<span class="meta-badge">{q.get("category", "総合")}</span><span class="difficulty-badge">{q.get("difficulty", "未設定")}</span>', unsafe_allow_html=True)
-    st.markdown(f'<div class="question-title">{q["title"]}</div>', unsafe_allow_html=True)
-    st.write(q["question"])
+# =========================================================
+# App Main
+# =========================================================
+def main():
+    st.set_page_config(page_title="株式投資マスタークイズ", page_icon="📊", layout="wide")
+    st.caption(f"VERSION: {APP_VERSION}")
 
-    image_path = q.get("image")
-    if image_path and Path(image_path).exists():
-        st.image(image_path, caption="問題用チャート：構造理解に必要なラインは表示、判断プロセスは解答後に表示", use_container_width=True)
+    ss_init()
+    questions = load_questions("questions.json")
 
-    key = f"answer_{q['id']}"
-    selected = st.radio(
-        "選択肢を選んでください",
-        options=list(q["options"].keys()),
-        format_func=lambda x: f"{x}. {q['options'][x]}",
-        key=key,
-        disabled=st.session_state.submitted_current,
-    )
+    # ----- Sidebar -----
+    st.sidebar.title("⚙️ 設定")
+    categories = ["すべて", "財務諸表分析", "ファンダメンタルズ", "チャート分析"]
+    difficulties = ["すべて", "初級", "中級", "上級"]
 
-    if not st.session_state.submitted_current:
-        if st.button("回答する", type="primary"):
-            st.session_state.answers[str(q["id"])] = selected
-            st.session_state.submitted_current = True
-            st.rerun()
+    selected_cat = st.sidebar.selectbox("カテゴリ", categories, index=0)
+    selected_diff = st.sidebar.selectbox("難易度", difficulties, index=0)
+    show_hint = st.sidebar.checkbox("ヒントを表示", value=True)
 
-    if st.session_state.submitted_current:
-        show_answer(q)
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("次の問題へ"):
-                if st.session_state.current_index + 1 >= len(st.session_state.quiz_questions):
-                    st.session_state.quiz_finished = True
-                else:
-                    st.session_state.current_index += 1
-                    st.session_state.submitted_current = False
-                st.rerun()
-        with col2:
-            if st.button("最初からやり直す"):
-                reset_quiz()
-                st.rerun()
+    if st.sidebar.button("🔁 リセット（スコア＆出題順）", key="btn_reset_all"):
+        st.session_state.score = {"correct": 0, "total": 0}
+        st.session_state.current_q = None
+        st.session_state.answered = False
+        st.session_state.queue_ids = []
+        st.session_state.filter_key = ""
+        st.session_state.fixed_options = []
+        st.session_state.fixed_qid = None
+        st.session_state.render_id += 1
+        rerun()
 
+    filtered = filter_questions(questions, selected_cat, selected_diff)
 
-def show_answer(q):
-    user_answer = st.session_state.answers.get(str(q["id"]))
-    correct_answer = q["answer"]
-    is_correct = user_answer == correct_answer
-    card_class = "result-card result-correct" if is_correct else "result-card result-wrong"
-    status_text = "正解：あなたの回答は正解です" if is_correct else "不正解：あなたの回答は不正解です"
+    # ----- Header -----
+    st.title("📊 株式投資マスタークイズ")
 
-    st.markdown(f"""
-    <div class="{card_class}">
-        <div class="result-status">{q["title"]}：{status_text}</div>
-        <div><strong>あなたの回答：</strong><span class="user-answer">{user_answer}. {q["options"][user_answer]}</span></div>
-        <div><strong>正解：</strong><span class="correct-answer">{correct_answer}. {q["options"][correct_answer]}</span></div>
-    </div>
-    """, unsafe_allow_html=True)
+    col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
+    col1.metric("正答数", st.session_state.score["correct"])
+    col2.metric("出題数", st.session_state.score["total"])
+    rate = (st.session_state.score["correct"] / st.session_state.score["total"] * 100) if st.session_state.score["total"] else 0
+    col3.metric("正答率", f"{rate:.1f}%")
+    col4.write(f"問題数: {len(filtered)}")
 
-    answer_image = q.get("answer_image")
-    if answer_image and Path(answer_image).exists():
-        st.markdown("#### 解答後のチャート解説")
-        st.image(answer_image, caption=q.get("answer_image_caption", "解答後チャート"), use_container_width=True)
+    if st.button("🎲 次の問題", key="btn_next_question"):
+        pick_next_question(filtered, selected_cat, selected_diff)
 
-    st.markdown(f"""
-    <div class="explanation-card">
-        <div class="explanation-title">解説</div>
-        <div class="explanation-section"><span class="explanation-label">分類：</span>{q.get("category", "総合")}</div>
-        <div class="explanation-section"><span class="explanation-label">難易度：</span>{q.get("difficulty", "未設定")}</div>
-        <div class="explanation-section"><span class="explanation-label">判断ポイント：</span><span class="explanation-point">{q.get("point", "")}</span></div>
-        <div class="explanation-section"><span class="explanation-label">理由：</span>{q["explanation"]}</div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.divider()
 
+    # ----- Ensure current question -----
+    if st.session_state.current_q is None and filtered:
+        pick_next_question(filtered, selected_cat, selected_diff)
 
-def reset_quiz():
-    st.session_state.quiz_started = False
-    st.session_state.quiz_finished = False
-    st.session_state.quiz_questions = []
-    st.session_state.current_index = 0
-    st.session_state.answers = {}
-    st.session_state.submitted_current = False
-    st.session_state.last_saved = False
+    q = st.session_state.current_q
+    if not q:
+        st.warning("表示できる問題がありません（フィルタ条件を変更してください）。")
+        st.stop()
 
+    qid = q["id"]
+    rid = st.session_state.render_id
 
-def show_history():
-    st.sidebar.divider()
-    st.sidebar.subheader("学習履歴")
-    if RESULTS_PATH.exists():
-        df = pd.read_csv(RESULTS_PATH)
-        st.sidebar.write(f"履歴件数：{len(df)}")
-        latest = df.tail(5)[["datetime", "score", "total", "accuracy"]]
-        st.sidebar.dataframe(latest, use_container_width=True)
-    else:
-        st.sidebar.caption("履歴はまだありません。")
+    # フィルタ変更等で current が範囲外になった場合
+    if qid not in {qq["id"] for qq in filtered} and filtered:
+        pick_next_question(filtered, selected_cat, selected_diff)
+        q = st.session_state.current_q
+        qid = q["id"]
+        rid = st.session_state.render_id
 
+    # ----- Question UI (ここ1箇所だけ) -----
+    st.markdown(f"### Q. {q['question']}")
+    st.caption(f"カテゴリ: {q.get('category','')} / 難易度: {q.get('difficulty','')}")
 
-def show_summary():
-    correct, total, accuracy, by_category, by_difficulty = calculate_results(st.session_state.quiz_questions, st.session_state.answers)
-    if not st.session_state.last_saved:
-        save_history(correct, total, accuracy, by_category, by_difficulty)
-        st.session_state.last_saved = True
+    if "financial_data" in q:
+        st.markdown("### 📊 損益計算書")
+        df = pd.DataFrame(q["financial_data"])
+        st.dataframe(df, use_container_width=True)
 
-    st.subheader("最終結果")
-    st.metric("総合正解数", f"{correct} / {total}")
-    st.progress(accuracy)
-    st.write(f"正答率：{accuracy:.1%}")
+    if "chart_data" in q:
+        st.markdown("### 📈 チャート")
+        render_chart(q["chart_data"])
 
-    st.subheader("分類別スコア")
-    st.dataframe(pd.DataFrame([
-        {"分類": k, "正解数": v["correct"], "問題数": v["total"], "正答率": f"{v['correct'] / v['total']:.1%}"}
-        for k, v in by_category.items()
-    ]), use_container_width=True)
+    if show_hint and "hint" in q:
+        with st.expander("💡 ヒント"):
+            st.info(q["hint"])
 
-    st.subheader("難易度別スコア")
-    st.dataframe(pd.DataFrame([
-        {"難易度": k, "正解数": v["correct"], "問題数": v["total"], "正答率": f"{v['correct'] / v['total']:.1%}"}
-        for k, v in by_difficulty.items()
-    ]), use_container_width=True)
+    # ✅ 固定された選択肢（ここが重要：再描画で順番が変わらない）
+    if st.session_state.fixed_qid != qid or not st.session_state.fixed_options:
+        # 何らかの理由で未初期化なら補完
+        opts = list(q["options"])
+        random.shuffle(opts)
+        st.session_state.fixed_options = opts
+        st.session_state.fixed_qid = qid
 
-    if st.button("新しいクイズを開始"):
-        reset_quiz()
-        st.rerun()
+    options = st.session_state.fixed_options
+
+    # ----- Answer UI (フォームで固定：二重描画/キー衝突回避) -----
+    form_key = f"form_{qid}_{rid}"
+    radio_key = f"radio_{qid}_{rid}"
+
+    with st.form(key=form_key):
+        choice = st.radio("回答:", options, key=radio_key)
+        submitted = st.form_submit_button("✅ 回答する")
+
+    if submitted and not st.session_state.answered:
+        st.session_state.answered = True
+        st.session_state.score["total"] += 1
+
+        correct = (choice == q["answer"])
+        if correct:
+            st.session_state.score["correct"] += 1
+            st.success("✅ 正解")
+        else:
+            st.error(f"❌ 不正解（正解: {q['answer']}）")
+
+        st.markdown("### 📝 解説")
+        st.write(q.get("explanation", ""))
+
+        if AUTO_ADVANCE:
+            time.sleep(SLEEP_SEC_CORRECT if correct else SLEEP_SEC_WRONG)
+            pick_next_question(filtered, selected_cat, selected_diff)
+            rerun()
 
 
-# Main
-initialize_state()
-all_questions = load_questions()
-st.markdown('<div class="main-title">📈 株式投資クイズアプリ</div>', unsafe_allow_html=True)
-st.markdown('<div class="sub-title">チャート分析・ファンダメンタルズ・総合判断を1問ずつ学習できます。</div>', unsafe_allow_html=True)
-
-categories = sorted({q.get("category", "未分類") for q in all_questions})
-difficulties = ["初級", "中級", "上級"]
-
-st.sidebar.header("出題設定")
-selected_categories = st.sidebar.multiselect("カテゴリ", categories, default=categories)
-selected_difficulties = st.sidebar.multiselect("難易度", difficulties, default=difficulties)
-mode = st.sidebar.selectbox("出題モード", ["ランダム出題", "順番に出題"])
-filtered = filter_questions(all_questions, selected_categories, selected_difficulties)
-max_questions = max(1, len(filtered)) if filtered else 1
-num_questions = st.sidebar.slider("出題数", 1, max_questions, min(5, max_questions))
-show_history()
-
-if not filtered:
-    st.warning("条件に一致する問題がありません。カテゴリまたは難易度を変更してください。")
-    st.stop()
-
-if not st.session_state.quiz_started:
-    st.info("左の設定を確認して、クイズを開始してください。")
-    if st.button("クイズを開始", type="primary"):
-        selected = filtered.copy()
-        if mode == "ランダム出題":
-            random.shuffle(selected)
-        selected = selected[:num_questions]
-        start_quiz(selected)
-        st.rerun()
-elif st.session_state.quiz_finished:
-    show_summary()
-else:
-    current_question = st.session_state.quiz_questions[st.session_state.current_index]
-    show_question(current_question)
-
-st.markdown("""
-<div class="warning-box">
-<strong>注意：</strong><br>
-このアプリは投資学習用です。特定銘柄の売買を推奨するものではありません。
-実際の投資判断では、業績、財務状況、バリュエーション、市場環境、リスク許容度を総合的に確認してください。
-</div>
-""", unsafe_allow_html=True)
+if __name__ == "__main__":
+    main()
