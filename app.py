@@ -1,6 +1,5 @@
 import json
 import random
-import time
 from pathlib import Path
 
 import pandas as pd
@@ -8,31 +7,97 @@ import streamlit as st
 import matplotlib
 import matplotlib.pyplot as plt
 
+# =========================
+# CONFIG（ここだけ触れば挙動が変わる）
+# =========================
+APP_VERSION = "2026-05-16_unbreakable_final"
+SHOW_HINT_DEFAULT = True
 
-# =========================================================
-# Config（必要ならここだけ触る）
-# =========================================================
-APP_VERSION = "2026-05-16_app_unbreakable_v1"
-AUTO_ADVANCE = True
-SLEEP_SEC_CORRECT = 0.8
-SLEEP_SEC_WRONG = 1.6
+# 自動遷移は「学習用途では事故りやすい」のでデフォルトOFF
+AUTO_ADVANCE = False
+AUTO_ADVANCE_SECONDS_CORRECT = 1.0
+AUTO_ADVANCE_SECONDS_WRONG = 2.0
 
 # フォント（Windows想定）
 matplotlib.rcParams["font.family"] = ["Meiryo UI", "Meiryo", "MS Gothic", "Yu Gothic", "sans-serif"]
 matplotlib.rcParams["axes.unicode_minus"] = False
 
 
-# =========================================================
-# Utils
-# =========================================================
-def rerun():
-    """Streamlit version差異吸収"""
+# =========================
+# SAFE RERUN（Streamlit差異吸収）
+# =========================
+def safe_rerun():
     try:
         st.rerun()
     except Exception:
         st.experimental_rerun()
 
 
+# =========================
+# SESSION STATE（最重要：ここで全状態を一元定義）
+# =========================
+def ss_init():
+    defaults = {
+        # 現在の問題
+        "current_q": None,
+        "current_qid": None,
+
+        # 出題順（重複しない）
+        "queue_ids": [],
+        "filter_key": "",
+
+        # UIフェーズ（ここが「回答前に正解表示」の完全対策）
+        # "question" = 回答前、"result" = 回答後
+        "phase": "question",
+
+        # 選択肢を固定（「選んだのに動く」対策）
+        "fixed_options": [],
+        "fixed_qid": None,
+
+        # 回答結果の保持（次の問題に持ち越さない）
+        "last_result": None,         # "correct" / "wrong"
+        "last_answer": None,
+        "last_explanation": None,
+
+        # スコア
+        "score": {"correct": 0, "total": 0},
+
+        # UI key 衝突回避
+        "render_id": 0,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+def ss_reset_result_state():
+    """次の問題に移るときに必ず呼ぶ（持ち越し事故を0にする）"""
+    st.session_state.phase = "question"
+    st.session_state.last_result = None
+    st.session_state.last_answer = None
+    st.session_state.last_explanation = None
+
+
+def ss_set_question(q: dict):
+    """問題をセットするときの唯一の入口（ここで全て初期化・固定化する）"""
+    st.session_state.current_q = q
+    st.session_state.current_qid = q["id"]
+    st.session_state.render_id += 1
+
+    # 次の問題になったら結果系は必ず消す
+    ss_reset_result_state()
+
+    # 選択肢は「この瞬間に1回だけ」シャッフルして固定
+    opts = list(q["options"])
+    random.shuffle(opts)
+    st.session_state.fixed_options = opts
+    st.session_state.fixed_qid = q["id"]
+
+
+# =========================
+# DATA LOAD / VALIDATION
+# =========================
+@st.cache_data
 def load_questions(path: str = "questions.json") -> list[dict]:
     p = Path(path)
     if not p.exists():
@@ -75,10 +140,8 @@ def load_questions(path: str = "questions.json") -> list[dict]:
             st.error(f"id={q['id']} の answer が options に含まれていません。")
             st.stop()
 
-        # チャート分析は chart_data 必須（「チャートがない」事故を防ぐ）
-        if q.get("category") == "チャート分析" and "chart_data" not in q:
-            st.error(f"id={q['id']} はチャート分析ですが chart_data がありません。")
-            st.stop()
+        # チャート分析でも chart_data が無い場合は「止めない」（CSV運用想定）
+        # 表示側で chart_data があれば描画する
 
     return data
 
@@ -89,18 +152,19 @@ def filter_questions(qs: list[dict], cat: str, diff: str) -> list[dict]:
         result = [q for q in result if q.get("category") == cat]
     if diff != "すべて":
         result = [q for q in result if q.get("difficulty") == diff]
-    # チャート分析は chart_data 無しなら除外（念のため）
-    result = [q for q in result if q.get("category") != "チャート分析" or "chart_data" in q]
     return result
 
 
+# =========================
+# CHART RENDER
+# =========================
 def render_chart(chart_data: dict):
     prices = chart_data.get("prices", [])
     volumes = chart_data.get("volumes", [])
     hints = chart_data.get("hints", {})  # {"resistance":..., "support":...}
 
     if not prices:
-        st.warning("chart_data はありますが prices が空です。")
+        st.info("チャートデータがありません（prices が空）。")
         return
 
     x = list(range(len(prices)))
@@ -128,29 +192,9 @@ def render_chart(chart_data: dict):
     st.pyplot(fig, clear_figure=True)
 
 
-# =========================================================
-# Session State (一元管理)
-# =========================================================
-def ss_init():
-    defaults = {
-        "current_q": None,
-        "answered": False,
-        "score": {"correct": 0, "total": 0},
-        "render_id": 0,
-
-        # 出題キュー
-        "queue_ids": [],
-        "filter_key": "",
-
-        # 選択肢固定（ここが「回答が動く」バグの解決点）
-        "fixed_options": [],        # 現在問題の表示順
-        "fixed_qid": None,          # fixed_options が紐づく問題id
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
-
-
+# =========================
+# QUIZ ENGINE（重複しない出題）
+# =========================
 def make_filter_key(cat: str, diff: str, n: int) -> str:
     return f"{cat}__{diff}__{n}"
 
@@ -161,21 +205,10 @@ def rebuild_queue(filtered_list: list[dict]):
     st.session_state.queue_ids = ids
 
 
-def set_current_question(q: dict):
-    st.session_state.current_q = q
-    st.session_state.answered = False
-    st.session_state.render_id += 1
-
-    # ✅ 選択肢は「このタイミングで1回だけ」シャッフルして固定
-    opts = list(q["options"])
-    random.shuffle(opts)
-    st.session_state.fixed_options = opts
-    st.session_state.fixed_qid = q["id"]
-
-
 def pick_next_question(filtered_list: list[dict], cat: str, diff: str):
     if not filtered_list:
         st.session_state.current_q = None
+        st.session_state.current_qid = None
         return
 
     fk = make_filter_key(cat, diff, len(filtered_list))
@@ -188,12 +221,12 @@ def pick_next_question(filtered_list: list[dict], cat: str, diff: str):
 
     next_id = st.session_state.queue_ids.pop(0)
     q = next(q for q in filtered_list if q["id"] == next_id)
-    set_current_question(q)
+    ss_set_question(q)
 
 
-# =========================================================
-# App Main
-# =========================================================
+# =========================
+# MAIN
+# =========================
 def main():
     st.set_page_config(page_title="株式投資マスタークイズ", page_icon="📊", layout="wide")
     st.caption(f"VERSION: {APP_VERSION}")
@@ -201,29 +234,31 @@ def main():
     ss_init()
     questions = load_questions("questions.json")
 
-    # ----- Sidebar -----
+    # ---- Sidebar
     st.sidebar.title("⚙️ 設定")
     categories = ["すべて", "財務諸表分析", "ファンダメンタルズ", "チャート分析"]
     difficulties = ["すべて", "初級", "中級", "上級"]
 
     selected_cat = st.sidebar.selectbox("カテゴリ", categories, index=0)
     selected_diff = st.sidebar.selectbox("難易度", difficulties, index=0)
-    show_hint = st.sidebar.checkbox("ヒントを表示", value=True)
+    show_hint = st.sidebar.checkbox("ヒントを表示", value=SHOW_HINT_DEFAULT)
 
     if st.sidebar.button("🔁 リセット（スコア＆出題順）", key="btn_reset_all"):
         st.session_state.score = {"correct": 0, "total": 0}
-        st.session_state.current_q = None
-        st.session_state.answered = False
         st.session_state.queue_ids = []
         st.session_state.filter_key = ""
+        st.session_state.current_q = None
+        st.session_state.current_qid = None
         st.session_state.fixed_options = []
         st.session_state.fixed_qid = None
+        ss_reset_result_state()
         st.session_state.render_id += 1
-        rerun()
+        safe_rerun()
 
+    # ---- Filter
     filtered = filter_questions(questions, selected_cat, selected_diff)
 
-    # ----- Header -----
+    # ---- Header
     st.title("📊 株式投資マスタークイズ")
 
     col1, col2, col3, col4 = st.columns([1, 1, 1, 2])
@@ -233,12 +268,13 @@ def main():
     col3.metric("正答率", f"{rate:.1f}%")
     col4.write(f"問題数: {len(filtered)}")
 
+    # 次の問題（いつでも押せるが、押した瞬間に結果はリセットされる）
     if st.button("🎲 次の問題", key="btn_next_question"):
         pick_next_question(filtered, selected_cat, selected_diff)
 
     st.divider()
 
-    # ----- Ensure current question -----
+    # ---- Ensure current question
     if st.session_state.current_q is None and filtered:
         pick_next_question(filtered, selected_cat, selected_diff)
 
@@ -250,33 +286,29 @@ def main():
     qid = q["id"]
     rid = st.session_state.render_id
 
-    # フィルタ変更等で current が範囲外になった場合
-    if qid not in {qq["id"] for qq in filtered} and filtered:
-        pick_next_question(filtered, selected_cat, selected_diff)
-        q = st.session_state.current_q
-        qid = q["id"]
-        rid = st.session_state.render_id
-
-    # ----- Question UI (ここ1箇所だけ) -----
+    # ---- Question
     st.markdown(f"### Q. {q['question']}")
     st.caption(f"カテゴリ: {q.get('category','')} / 難易度: {q.get('difficulty','')}")
 
+    # 財務データ
     if "financial_data" in q:
         st.markdown("### 📊 損益計算書")
         df = pd.DataFrame(q["financial_data"])
         st.dataframe(df, use_container_width=True)
 
+    # チャート（あれば）
     if "chart_data" in q:
         st.markdown("### 📈 チャート")
         render_chart(q["chart_data"])
 
-    if show_hint and "hint" in q:
+    # ヒント
+    if show_hint and "hint" in q and q.get("hint"):
         with st.expander("💡 ヒント"):
             st.info(q["hint"])
 
-    # ✅ 固定された選択肢（ここが重要：再描画で順番が変わらない）
+    # ---- Options (fixed)
+    # 何らかの理由で固定選択肢が未設定なら補完
     if st.session_state.fixed_qid != qid or not st.session_state.fixed_options:
-        # 何らかの理由で未初期化なら補完
         opts = list(q["options"])
         random.shuffle(opts)
         st.session_state.fixed_options = opts
@@ -284,7 +316,7 @@ def main():
 
     options = st.session_state.fixed_options
 
-    # ----- Answer UI (フォームで固定：二重描画/キー衝突回避) -----
+    # ---- Answer form
     form_key = f"form_{qid}_{rid}"
     radio_key = f"radio_{qid}_{rid}"
 
@@ -292,24 +324,42 @@ def main():
         choice = st.radio("回答:", options, key=radio_key)
         submitted = st.form_submit_button("✅ 回答する")
 
-    if submitted and not st.session_state.answered:
-        st.session_state.answered = True
+    # ---- Grading (only once)
+    if submitted and st.session_state.phase == "question":
         st.session_state.score["total"] += 1
-
         correct = (choice == q["answer"])
         if correct:
             st.session_state.score["correct"] += 1
-            st.success("✅ 正解")
-        else:
-            st.error(f"❌ 不正解（正解: {q['answer']}）")
 
-        st.markdown("### 📝 解説")
-        st.write(q.get("explanation", ""))
+        st.session_state.last_result = "correct" if correct else "wrong"
+        st.session_state.last_answer = q["answer"]
+        st.session_state.last_explanation = q.get("explanation", "")
+        st.session_state.phase = "result"
 
+        # 自動遷移（任意）
         if AUTO_ADVANCE:
-            time.sleep(SLEEP_SEC_CORRECT if correct else SLEEP_SEC_WRONG)
+            import time
+            time.sleep(AUTO_ADVANCE_SECONDS_CORRECT if correct else AUTO_ADVANCE_SECONDS_WRONG)
             pick_next_question(filtered, selected_cat, selected_diff)
-            rerun()
+            safe_rerun()
+        else:
+            safe_rerun()
+
+    # ---- Result UI (phase=="result" のときだけ出す → 回答前に出ない)
+    if st.session_state.phase == "result":
+        if st.session_state.last_result == "correct":
+            st.success("✅ 正解")
+        elif st.session_state.last_result == "wrong":
+            st.error(f"❌ 不正解（正解: {st.session_state.last_answer}）")
+
+        if st.session_state.last_explanation:
+            st.markdown("### 📝 解説")
+            st.write(st.session_state.last_explanation)
+
+        # 次へ（回答後のみ表示）
+        if st.button("➡ 次の問題へ", key=f"btn_next_after_{qid}_{rid}"):
+            pick_next_question(filtered, selected_cat, selected_diff)
+            safe_rerun()
 
 
 if __name__ == "__main__":
