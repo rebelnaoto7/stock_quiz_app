@@ -1,4 +1,1 @@
-streamlit
-matplotlib
-pandas
-pytest
+Django>=5.2
