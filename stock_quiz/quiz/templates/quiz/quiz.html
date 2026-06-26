@@ -1,0 +1,189 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>株式投資マスタークイズ</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Meiryo UI", "Meiryo", "Yu Gothic", "MS Gothic", sans-serif;
+      margin: 0; background: #f8fafc; color: #0f172a;
+    }
+    .layout { display: flex; min-height: 100vh; }
+    .sidebar { width: 260px; background: #1e293b; color: #e2e8f0; padding: 20px 18px; flex-shrink: 0; }
+    .sidebar h2 { font-size: 18px; margin-top: 0; }
+    .sidebar label { display: block; margin: 14px 0 4px; font-size: 13px; color: #cbd5e1; }
+    .sidebar select, .sidebar button { width: 100%; padding: 8px; border-radius: 8px; border: 1px solid #475569; font-family: inherit; font-size: 14px; }
+    .sidebar select { background: #0f172a; color: #e2e8f0; }
+    .chk { margin: 14px 0; font-size: 14px; }
+    .btn { cursor: pointer; border: none; border-radius: 8px; padding: 10px; font-family: inherit; font-size: 14px; font-weight: bold; }
+    .btn-apply { background: #2563eb; color: #fff; margin-top: 16px; }
+    .btn-reset { background: #475569; color: #fff; margin-top: 10px; }
+    .main { flex: 1; padding: 28px 36px; max-width: 900px; }
+    h1 { font-size: 26px; margin: 0 0 4px; }
+    .metrics { display: flex; gap: 24px; margin: 18px 0; flex-wrap: wrap; }
+    .metric { background: #fff; border: 1px solid #e2e8f0; border-radius: 12px; padding: 12px 18px; min-width: 110px; }
+    .metric .label { font-size: 12px; color: #64748b; }
+    .metric .value { font-size: 24px; font-weight: bold; }
+    .divider { border: none; border-top: 1px solid #e2e8f0; margin: 18px 0; }
+    .qcard { background: #fff; border: 1px solid #e2e8f0; border-radius: 14px; padding: 22px 24px; }
+    .qmeta { color: #64748b; font-size: 13px; margin-bottom: 12px; }
+    .qtext { font-size: 19px; font-weight: bold; margin: 0 0 18px; line-height: 1.5; }
+    .options label { display: block; background: #f1f5f9; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px 14px; margin-bottom: 10px; cursor: pointer; font-size: 15px; }
+    .options label:hover { background: #e2e8f0; }
+    .options input { margin-right: 10px; }
+    .opt-answer { background: #dcfce7; border-color: #16a34a; }
+    .btn-answer { background: #16a34a; color: #fff; padding: 11px 22px; }
+    .btn-next { background: #2563eb; color: #fff; padding: 11px 22px; }
+    .btn-row { margin-top: 8px; }
+    .hint { background: #eff6ff; border-left: 4px solid #2563eb; padding: 10px 14px; border-radius: 6px; margin: 14px 0; }
+    .result-ok { background: #dcfce7; border-left: 4px solid #16a34a; padding: 12px 16px; border-radius: 8px; font-weight: bold; }
+    .result-ng { background: #fee2e2; border-left: 4px solid #dc2626; padding: 12px 16px; border-radius: 8px; font-weight: bold; }
+    .explanation { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px; padding: 14px 16px; margin-top: 14px; }
+    .explanation h3 { margin: 0 0 6px; font-size: 15px; }
+    .warn { background: #fef9c3; border-left: 4px solid #eab308; padding: 12px 16px; border-radius: 8px; }
+    .chart img { max-width: 100%; border: 1px solid #e2e8f0; border-radius: 10px; }
+  </style>
+</head>
+<body>
+<div class="layout">
+  <!-- Sidebar -->
+  <aside class="sidebar">
+    <h2>設定</h2>
+    <form method="post">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="filter">
+      <label>カテゴリ</label>
+      <select name="category">
+        {% for c in cat_options %}
+          {% if c.selected %}
+            <option value="{{ c.value }}" selected>{{ c.value }}</option>
+          {% else %}
+            <option value="{{ c.value }}">{{ c.value }}</option>
+          {% endif %}
+        {% endfor %}
+      </select>
+      <label>難易度</label>
+      <select name="difficulty">
+        {% for d in diff_options %}
+          {% if d.selected %}
+            <option value="{{ d.value }}" selected>{{ d.value }}</option>
+          {% else %}
+            <option value="{{ d.value }}">{{ d.value }}</option>
+          {% endif %}
+        {% endfor %}
+      </select>
+      <div class="chk">
+        <label style="display:inline; color:#e2e8f0;">
+          {% if show_hint %}
+            <input type="checkbox" name="show_hint" checked>
+          {% else %}
+            <input type="checkbox" name="show_hint">
+          {% endif %}
+          ヒントを表示
+        </label>
+      </div>
+      <button type="submit" class="btn btn-apply">この条件で出題</button>
+    </form>
+    <form method="post">
+      {% csrf_token %}
+      <input type="hidden" name="action" value="reset">
+      <button type="submit" class="btn btn-reset">リセット（スコア＆出題順）</button>
+    </form>
+  </aside>
+
+  <!-- Main -->
+  <main class="main">
+    <h1>株式投資マスタークイズ</h1>
+    <div class="metrics">
+      <div class="metric"><div class="label">正答数</div><div class="value">{{ score.correct }}</div></div>
+      <div class="metric"><div class="label">出題数</div><div class="value">{{ score.total }}</div></div>
+      <div class="metric"><div class="label">正答率</div><div class="value">{{ rate|floatformat:1 }}%</div></div>
+      <div class="metric"><div class="label">問題数（条件内）</div><div class="value">{{ total_in_filter }}</div></div>
+    </div>
+    <hr class="divider">
+
+    {% if q %}
+      <div class="qcard">
+        <div class="qmeta">カテゴリ: {{ q.category }} / 難易度: {{ q.difficulty }}</div>
+        <p class="qtext">Q. {{ q.question }}</p>
+
+        {% if q.chart_data %}
+          <div class="chart">
+            <h3>チャート</h3>
+            {% if q.chart_data.image %}
+              <img src="{% static q.chart_data.image %}" alt="チャート">
+            {% else %}
+              <p class="qmeta">チャートデータあり（画像未設定）</p>
+            {% endif %}
+          </div>
+        {% endif %}
+
+        {% if show_hint %}
+          {% if q.hint %}
+            <div class="hint">ヒント: {{ q.hint }}</div>
+          {% endif %}
+        {% endif %}
+
+        {% if is_question %}
+          <!-- 出題中 -->
+          <form method="post">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="answer">
+            <div class="options">
+              {% for opt in options %}
+                <label>
+                  {% if forloop.first %}
+                    <input type="radio" name="choice" value="{{ opt }}" required>
+                  {% else %}
+                    <input type="radio" name="choice" value="{{ opt }}">
+                  {% endif %}
+                  {{ opt }}
+                </label>
+              {% endfor %}
+            </div>
+            <div class="btn-row">
+              <button type="submit" class="btn btn-answer">回答する</button>
+            </div>
+          </form>
+        {% else %}
+          <!-- 回答後 -->
+          <div class="options">
+            {% for o in result_options %}
+              {% if o.is_answer %}
+                <label class="opt-answer">{{ o.text }}　← 正解</label>
+              {% else %}
+                <label>{{ o.text }}</label>
+              {% endif %}
+            {% endfor %}
+          </div>
+
+          {% if is_correct %}
+            <div class="result-ok">正解</div>
+          {% else %}
+            <div class="result-ng">不正解（正解: {{ last_answer }}）</div>
+          {% endif %}
+
+          {% if last_explanation %}
+            <div class="explanation">
+              <h3>解説</h3>
+              <div>{{ last_explanation }}</div>
+            </div>
+          {% endif %}
+
+          <form method="post" class="btn-row">
+            {% csrf_token %}
+            <input type="hidden" name="action" value="next">
+            <button type="submit" class="btn btn-next">次の問題へ</button>
+          </form>
+        {% endif %}
+      </div>
+    {% else %}
+      <div class="warn">表示できる問題がありません（フィルタ条件を変更してください）。</div>
+    {% endif %}
+  </main>
+</div>
+</body>
+</html>
